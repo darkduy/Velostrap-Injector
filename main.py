@@ -454,7 +454,7 @@ class FlagInjector:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(message)s")
 
     print(BANNER)
     print("[ + ] Velorin FFlag Injector — discord.gg/F8kkN62Apk\n")

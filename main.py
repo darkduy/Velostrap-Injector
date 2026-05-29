@@ -1,20 +1,17 @@
 """
 main.py — Roblox FFlag injector via direct memory manipulation.
-Reads flag definitions from fflags.json and writes them into a running
-RobloxPlayerBeta.exe process using the NtDll memory layer.
+Sử dụng pattern scan để tìm FFlagList động, không cần offset cứng hay server.
 """
 
 import json
 import logging
 import os
-import re
 import sys
 from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
-import requests
-
 from core.memory import MemoryManager, close_handle, AttachTimeoutError
+from core.scanner import PatternScanner
 
 log = logging.getLogger(__name__)
 
@@ -22,29 +19,28 @@ log = logging.getLogger(__name__)
 # Constants — FFlag map layout
 # ──────────────────────────────────────────────
 
-OFF_FFLAG_VALUE_PTR  = 0xC0   # offset inside FFlag getset struct → value ptr
+OFF_FFLAG_VALUE_PTR = 0xC0
 
-OFF_MAP_END          = 0x00
-OFF_MAP_LIST         = 0x10
-OFF_MAP_MASK         = 0x28
+OFF_MAP_END      = 0x00
+OFF_MAP_LIST     = 0x10
+OFF_MAP_MASK     = 0x28
 
-OFF_ENTRY_FORWARD    = 0x08
-OFF_ENTRY_STRING     = 0x10
-OFF_ENTRY_GETSET     = 0x30
+OFF_ENTRY_FORWARD = 0x08
+OFF_ENTRY_STRING  = 0x10
+OFF_ENTRY_GETSET  = 0x30
 
-OFF_STR_BYTES        = 0x00
-OFF_STR_SIZE         = 0x10
-OFF_STR_CAPACITY     = 0x18
+OFF_STR_SIZE     = 0x10
+OFF_STR_CAPACITY = 0x18
 
 # ──────────────────────────────────────────────
-# Constants — traversal limits / tuning
+# Constants — traversal limits
 # ──────────────────────────────────────────────
 
-NODE_READ_SIZE   = 64
-NODE_STRIDES     = [64, 72, 56, 80, 88, 96]
-MAX_CHAIN_STEPS  = 128
-MAX_CHAIN_SAFETY = 1_000
-MIN_VALID_PTR    = 0x10_000
+NODE_READ_SIZE    = 64
+NODE_STRIDES      = [64, 72, 56, 80, 88, 96]
+MAX_CHAIN_STEPS   = 128
+MAX_CHAIN_SAFETY  = 1_000
+MIN_VALID_PTR     = 0x10_000
 FLAG_ADDR_LRU_MAX = 4_096
 
 # ──────────────────────────────────────────────
@@ -55,14 +51,10 @@ FNV1A_64_BASIS = 0xCBF29CE484222325
 FNV1A_64_PRIME = 0x100000001B3
 
 # ──────────────────────────────────────────────
-# Constants — process targets
+# Constants — process target
 # ──────────────────────────────────────────────
 
 ROBLOX_EXE = "RobloxPlayerBeta.exe"
-
-OFFSETS_URL     = "https://npdrlaufeimrkvdnjijl.supabase.co/functions/v1/get-offsets"
-OFFSETS_PATTERN = re.compile(r"Pointer\s*=\s*(0x[0-9a-fA-F]+)")
-DEFAULT_OFFSET  = 0x7CE33D8
 
 # ──────────────────────────────────────────────
 # FFlag type prefixes
@@ -86,50 +78,22 @@ BANNER = r"""
 # Helpers
 # ──────────────────────────────────────────────
 
-def fetch_flag_list_offset() -> int:
-    """Try to fetch the current FFlagList pointer offset from the remote endpoint.
-
-    Falls back to DEFAULT_OFFSET on any error.
-    """
-    try:
-        resp = requests.get(OFFSETS_URL, timeout=10)
-        if resp.status_code == 200:
-            m = OFFSETS_PATTERN.search(resp.text)
-            if m:
-                offset = int(m.group(1), 16)
-                log.debug("Fetched offset from remote: 0x%X", offset)
-                return offset
-    except Exception as exc:
-        log.debug("Could not fetch remote offset: %s", exc)
-    log.debug("Using default offset: 0x%X", DEFAULT_OFFSET)
-    return DEFAULT_OFFSET
-
-
 def get_base_path() -> str:
-    """Return the directory that contains the executable (or this script)."""
     if getattr(sys, "frozen", False) or hasattr(sys, "real_path"):
         return os.path.dirname(os.path.realpath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def parse_flag_type(key: str) -> Tuple[str, str]:
-    """Derive the clean flag name and its type (string / int / bool) from *key*.
-
-    Returns *(clean_name, type_str)*.
-    """
     for prefix in STRING_PREFIXES:
         if key.startswith(prefix):
             return key[len(prefix):], "string"
-
     for prefix in INT_PREFIXES:
         if key.startswith(prefix):
             return key[len(prefix):], "int"
-
     for prefix in BOOL_PREFIXES:
         if key.startswith(prefix):
             return key[len(prefix):], "bool"
-
-    # Unknown prefix — default to int (same behaviour as original)
     return key, "int"
 
 
@@ -140,29 +104,26 @@ def parse_flag_type(key: str) -> Tuple[str, str]:
 class FlagInjector:
     """
     Locates and patches Roblox FFlags in memory.
-
-    Call :meth:`apply_json` to read a JSON file and write all flags,
-    then :meth:`cleanup` to release the process handle.
+    FFlagList offset tìm động qua pattern scan — không cần server hay offset cứng.
     """
 
-    def __init__(self, flag_list_offset: int) -> None:
-        self._flag_list_offset = flag_list_offset
-
-        self._mm = MemoryManager()
+    def __init__(self) -> None:
+        self._mm  = MemoryManager()
         self._mem = self._mm.mem
 
         self._process_handle: int = 0
         self._module_base:    int = 0
         self._module_size:    int = 0
+        self._flag_list_offset: int = 0
 
-        # Caches
-        self._singleton_addr:  int = 0
-        self._hash_cache:      Dict[str, int] = {}
-        self._lookup_meta:     Dict[str, Dict[str, int]] = {}
-        self._value_ptr_lru:   OrderedDict[str, int] = OrderedDict()
-        self._map_identity:    Tuple[int, int, int] = (0, 0, 0)
+        self._singleton_addr: int = 0
+        self._hash_cache:     Dict[str, int] = {}
+        self._lookup_meta:    Dict[str, Dict[str, int]] = {}
+        self._value_ptr_lru:  OrderedDict[str, int] = OrderedDict()
+        self._map_identity:   Tuple[int, int, int] = (0, 0, 0)
 
         self._attach()
+        self._scan_offset()
 
     # ── attach ─────────────────────────────────
 
@@ -173,6 +134,22 @@ class FlagInjector:
         )
         print(f"[ + ] Attached  handle=0x{self._process_handle:X}")
         print(f"[ + ] Module    base=0x{self._module_base:X}  size=0x{self._module_size:X}")
+
+    # ── pattern scan ───────────────────────────
+
+    def _scan_offset(self) -> None:
+        print("[ + ] Scanning for FFlagList …")
+        scanner = PatternScanner(
+            self._process_handle,
+            self._module_base,
+            self._module_size,
+            self._mem,
+        )
+        offset = scanner.find_fflaglist_offset()
+        if offset is None:
+            raise RuntimeError("Pattern scan failed — FFlagList not found.")
+        self._flag_list_offset = offset
+        print(f"[ + ] FFlagList offset: 0x{offset:X}")
 
     # ── ptr validation ─────────────────────────
 
@@ -186,12 +163,10 @@ class FlagInjector:
         cached = self._hash_cache.get(name)
         if cached is not None:
             return cached
-
         h = FNV1A_64_BASIS
         for byte in name.encode("utf-8", errors="ignore"):
             h ^= byte
             h = (h * FNV1A_64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
-
         self._hash_cache[name] = h
         return h
 
@@ -234,20 +209,17 @@ class FlagInjector:
         )
 
         if str_alloc > 0xF:
-            # Heap-allocated string — dereference the pointer
             ptr = int.from_bytes(entry_data[base: base + 8], "little")
             if not self._is_valid_ptr(ptr):
                 return b"", 0
             name_bytes = self._mem.read(self._process_handle, ptr, str_size)
             return (name_bytes[:str_size] if name_bytes else b""), str_size
 
-        # SSO (small string optimisation) — inline bytes
         return entry_data[base: base + str_size], str_size
 
     def _read_node_entry(self, node_ptr: int) -> Optional[bytes]:
         if not self._is_valid_ptr(node_ptr):
             return None
-
         for stride in NODE_STRIDES:
             if stride < NODE_READ_SIZE:
                 continue
@@ -257,7 +229,6 @@ class FlagInjector:
                 continue
             if len(data) >= NODE_READ_SIZE:
                 return data
-
         return None
 
     # ── singleton (FFlagList) ──────────────────
@@ -274,16 +245,15 @@ class FlagInjector:
 
         if absolute > 0:
             self._singleton_addr = absolute
-            print(f"[ + ] FFlagList at 0x{absolute:X}  (offset 0x{self._flag_list_offset:X})")
+            print(f"[ + ] FFlagList at 0x{absolute:X}")
             return absolute
 
-        print("[ - ] Failed to locate FFlagList.")
+        print("[ - ] Failed to read FFlagList.")
         return 0
 
     # ── flag address lookup ────────────────────
 
     def _find_flag_addr(self, name: str) -> int:
-        """Locate the getset pointer for flag *name*.  Returns 0 on failure."""
         cached = self._get_cached_value_ptr(name)
         if cached:
             return cached
@@ -312,8 +282,7 @@ class FlagInjector:
             self._invalidate_caches(clear_hash=False)
             self._map_identity = identity
 
-        meta = self._lookup_meta.get(name, {})
-
+        meta         = self._lookup_meta.get(name, {})
         bucket_index = meta.get("bucketindex", self._fnv1a64(name) & map_mask) & map_mask
         bucket_base  = map_list + (bucket_index * 16)
 
@@ -326,7 +295,7 @@ class FlagInjector:
         if not self._is_valid_ptr(node_current) or node_current == map_end:
             return 0
 
-        # Fast path — check cached node first
+        # Fast path — cached node
         cached_node = meta.get("nodeptr", 0)
         if cached_node and self._is_valid_ptr(cached_node):
             entry = self._read_node_entry(cached_node)
@@ -340,9 +309,8 @@ class FlagInjector:
                         return getset
 
         # Walk the chain
-        visited  = set()
-        steps    = 0
-        safety   = 0
+        visited = set()
+        steps = safety = 0
 
         while steps < MAX_CHAIN_STEPS and safety < MAX_CHAIN_SAFETY:
             steps  += 1
@@ -401,7 +369,6 @@ class FlagInjector:
     # ── public API ─────────────────────────────
 
     def apply_flag(self, key: str, val) -> Tuple[bool, str]:
-        """Write a single FFlag.  Returns *(success, status_message)*."""
         clean_name, flag_type = parse_flag_type(key)
 
         try:
@@ -418,10 +385,7 @@ class FlagInjector:
                 return (ok, f"[ + ] {key} = {int_val}") if ok else (False, f"[ - ] Failed: {key}")
 
             if flag_type == "bool":
-                if isinstance(val, bool):
-                    bool_val = val
-                else:
-                    bool_val = str(val).lower() == "true"
+                bool_val = val if isinstance(val, bool) else str(val).lower() == "true"
                 ok = self._write_int(clean_name, int(bool_val))
                 return (ok, f"[ + ] {key} = {bool_val}") if ok else (False, f"[ - ] Failed: {key}")
 
@@ -431,7 +395,6 @@ class FlagInjector:
         return False, f"[ - ] Unknown flag type for: {key}"
 
     def apply_json(self, json_path: str) -> None:
-        """Read *json_path* and apply every flag it defines."""
         if not os.path.exists(json_path):
             print(f"[ - ] File not found: {json_path}")
             return
@@ -459,7 +422,6 @@ class FlagInjector:
         print(f"\n[ + ] Applied {success}/{total} flags.")
 
     def cleanup(self) -> None:
-        """Release the process handle and clear all caches."""
         self._invalidate_caches(clear_hash=True)
         if self._process_handle:
             close_handle(self._process_handle)
@@ -476,11 +438,10 @@ def main() -> None:
     print(BANNER)
     print("[ + ] Velorin FFlag Injector — discord.gg/F8kkN62Apk\n")
 
-    offset   = fetch_flag_list_offset()
     injector = None
 
     try:
-        injector = FlagInjector(flag_list_offset=offset)
+        injector = FlagInjector()
 
         base_dir  = get_base_path()
         json_path = os.path.join(base_dir, "fflags.json")
@@ -495,6 +456,8 @@ def main() -> None:
 
     except AttachTimeoutError as exc:
         print(f"\n[ - ] Attach timed out: {exc}")
+    except RuntimeError as exc:
+        print(f"\n[ - ] {exc}")
     except Exception as exc:
         print(f"\n[ - ] Unexpected error: {exc}")
         log.exception("Unhandled exception in main")

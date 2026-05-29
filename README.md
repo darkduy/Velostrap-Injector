@@ -3,6 +3,20 @@ Roblox FFlag injector — tìm FFlagList động qua pattern scan, không cần 
 
 ---
 
+## Tải file ở đây
+
+
+</body>
+</html>
+
+| FILE          | DOWNLOAD                                |
+| ------------- | --------------------------------------- |
+| main.exe      | [click here](https://github.com/darkduy/Velostrap-Injector/releases/latest/download/main.exe)  |
+| mainDEBUG.exe | [click here](https://github.com/darkduy/Velostrap-Injector/releases/latest/download/mainDEBUG.exe) |
+
+
+---
+
 ## Cách sử dụng
 
 1. Mở Roblox

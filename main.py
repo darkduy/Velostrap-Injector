@@ -1,6 +1,14 @@
 """
 main.py — Roblox FFlag injector via direct memory manipulation.
-Sử dụng pattern scan để tìm FFlagList động, không cần offset cứng hay server.
+Reads flag definitions from fflags.json and writes them into a running
+RobloxPlayerBeta.exe process using the NtDll memory layer.
+
+Offset tìm động qua pattern scan (core/scanner.py) — không cần server hay offset cứng.
+
+── Cập nhật sau Roblox update ──────────────────────────────────────────────────
+Nếu flags không apply được sau update, kiểm tra và sửa các OFF_* constants bên dưới
+bằng Cheat Engine. Xem README.md → "Cập nhật sau Roblox update" để biết chi tiết.
+────────────────────────────────────────────────────────────────────────────────
 """
 
 import json
@@ -17,20 +25,22 @@ log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
 # Constants — FFlag map layout
+# Đây là những giá trị cần kiểm tra bằng Cheat Engine khi Roblox update.
+# Xem README.md để biết cách tìm lại từng giá trị.
 # ──────────────────────────────────────────────
 
-OFF_FFLAG_VALUE_PTR = 0xC0
+OFF_FFLAG_VALUE_PTR = 0xC0   # offset trong getset struct → value pointer
 
-OFF_MAP_END      = 0x00
-OFF_MAP_LIST     = 0x10
-OFF_MAP_MASK     = 0x28
+OFF_MAP_END         = 0x00   # offset → map end sentinel pointer
+OFF_MAP_LIST        = 0x10   # offset → bucket array pointer
+OFF_MAP_MASK        = 0x28   # offset → bucket count mask (2^n - 1)
 
-OFF_ENTRY_FORWARD = 0x08
-OFF_ENTRY_STRING  = 0x10
-OFF_ENTRY_GETSET  = 0x30
+OFF_ENTRY_FORWARD   = 0x08   # offset trong node → next node pointer
+OFF_ENTRY_STRING    = 0x10   # offset trong node → flag name string struct
+OFF_ENTRY_GETSET    = 0x30   # offset trong node → getset/value pointer
 
-OFF_STR_SIZE     = 0x10
-OFF_STR_CAPACITY = 0x18
+OFF_STR_SIZE        = 0x10   # offset trong string struct → length
+OFF_STR_CAPACITY    = 0x18   # offset trong string struct → capacity
 
 # ──────────────────────────────────────────────
 # Constants — traversal limits
@@ -79,12 +89,14 @@ BANNER = r"""
 # ──────────────────────────────────────────────
 
 def get_base_path() -> str:
+    """Return the directory containing the executable (or this script)."""
     if getattr(sys, "frozen", False) or hasattr(sys, "real_path"):
         return os.path.dirname(os.path.realpath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def parse_flag_type(key: str) -> Tuple[str, str]:
+    """Derive the clean flag name and its type (string / int / bool) from *key*."""
     for prefix in STRING_PREFIXES:
         if key.startswith(prefix):
             return key[len(prefix):], "string"
@@ -104,23 +116,25 @@ def parse_flag_type(key: str) -> Tuple[str, str]:
 class FlagInjector:
     """
     Locates and patches Roblox FFlags in memory.
-    FFlagList offset tìm động qua pattern scan — không cần server hay offset cứng.
+
+    FFlagList offset tìm động qua pattern scan mỗi lần chạy.
+    Gọi apply_json() để apply flags, cleanup() để giải phóng handle.
     """
 
     def __init__(self) -> None:
         self._mm  = MemoryManager()
         self._mem = self._mm.mem
 
-        self._process_handle: int = 0
-        self._module_base:    int = 0
-        self._module_size:    int = 0
+        self._process_handle:   int = 0
+        self._module_base:      int = 0
+        self._module_size:      int = 0
         self._flag_list_offset: int = 0
+        self._singleton_addr:   int = 0
 
-        self._singleton_addr: int = 0
-        self._hash_cache:     Dict[str, int] = {}
-        self._lookup_meta:    Dict[str, Dict[str, int]] = {}
-        self._value_ptr_lru:  OrderedDict[str, int] = OrderedDict()
-        self._map_identity:   Tuple[int, int, int] = (0, 0, 0)
+        self._hash_cache:    Dict[str, int] = {}
+        self._lookup_meta:   Dict[str, Dict[str, int]] = {}
+        self._value_ptr_lru: OrderedDict[str, int] = OrderedDict()
+        self._map_identity:  Tuple[int, int, int] = (0, 0, 0)
 
         self._attach()
         self._scan_offset()
@@ -147,7 +161,11 @@ class FlagInjector:
         )
         offset = scanner.find_fflaglist_offset()
         if offset is None:
-            raise RuntimeError("Pattern scan failed — FFlagList not found.")
+            raise RuntimeError(
+                "Pattern scan failed — FFlagList not found.\n"
+                "      Roblox có thể đã update và đổi instruction pattern.\n"
+                "      Xem README.md → 'Cập nhật core/scanner.py' để biết cách fix."
+            )
         self._flag_list_offset = offset
         print(f"[ + ] FFlagList offset: 0x{offset:X}")
 
@@ -369,6 +387,7 @@ class FlagInjector:
     # ── public API ─────────────────────────────
 
     def apply_flag(self, key: str, val) -> Tuple[bool, str]:
+        """Write a single FFlag. Returns (success, status_message)."""
         clean_name, flag_type = parse_flag_type(key)
 
         try:
@@ -395,6 +414,7 @@ class FlagInjector:
         return False, f"[ - ] Unknown flag type for: {key}"
 
     def apply_json(self, json_path: str) -> None:
+        """Read json_path and apply every flag it defines."""
         if not os.path.exists(json_path):
             print(f"[ - ] File not found: {json_path}")
             return
@@ -422,6 +442,7 @@ class FlagInjector:
         print(f"\n[ + ] Applied {success}/{total} flags.")
 
     def cleanup(self) -> None:
+        """Release the process handle and clear all caches."""
         self._invalidate_caches(clear_hash=True)
         if self._process_handle:
             close_handle(self._process_handle)

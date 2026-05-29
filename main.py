@@ -454,7 +454,17 @@ class FlagInjector:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(message)s")
+    # Nếu tên exe kết thúc bằng "DEBUG" (ví dụ mainDEBUG.exe) thì bật logging chi tiết
+    exe_name = os.path.splitext(os.path.basename(sys.executable))[0].upper()
+    is_debug = exe_name.endswith("DEBUG")
+
+    logging.basicConfig(
+        level=logging.DEBUG if is_debug else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s" if is_debug else "%(levelname)s %(message)s",
+    )
+
+    if is_debug:
+        print("[DEBUG MODE — logging chi tiết được bật]")
 
     print(BANNER)
     print("[ + ] Velorin FFlag Injector — discord.gg/F8kkN62Apk\n")

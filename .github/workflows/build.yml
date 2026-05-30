@@ -35,6 +35,9 @@ jobs:
       - name: Copy .pyd into core/
         working-directory: core_rs
         run: |
+          Write-Host "Cache hit: ${{ steps.cache-rust.outputs.cache-hit }}"
+          Write-Host "dist_rs contents:"
+          Get-ChildItem dist_rs -ErrorAction SilentlyContinue
           $pyd = Get-ChildItem dist_rs -Filter "*.pyd" | Select-Object -First 1
           Copy-Item $pyd.FullName -Destination ..\core\core_rs.pyd
 

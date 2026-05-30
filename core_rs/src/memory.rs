@@ -261,17 +261,16 @@ impl MemoryManager {
 }
 
 impl MemoryManager {
-    fn _try_attach(&self, process_name: &str, module_name: &str) -> PyResult<SafeHandle> {
-        let pid  = self.proc.find_pid(process_name)?;
-        let mut safe = self.proc.open_process(pid)?;
+fn _try_attach(&self, process_name: &str, module_name: &str) -> PyResult<SafeHandle> {
+    let pid  = self.proc.find_pid_inner(process_name)?;
+    let mut safe = self.proc.open_process_inner(pid)?;
 
-        let (base, size) = match self.proc.get_module_base(pid, module_name) {
-            Ok(v)  => v,
-            Err(e) => { safe.close(); return Err(e); }
-        };
+    let (base, size) = match self.proc.get_module_base_inner(pid, module_name) {
+        Ok(v)  => v,
+        Err(e) => { safe.close(); return Err(e); }
+    };
 
-        safe.module_base = base;
-        safe.module_size = size;
-        Ok(safe)
-    }
+    safe.module_base = base;
+    safe.module_size = size;
+    Ok(safe)
 }

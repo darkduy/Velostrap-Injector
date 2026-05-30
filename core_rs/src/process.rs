@@ -15,6 +15,21 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
 use crate::errors::{ModuleNotFound, ProcessNotFound};
 
 // ──────────────────────────────────────────────
+// SnapGuard — RAII wrapper để tự động CloseHandle snapshot
+// Thay thế scopeguard::defer! vì macro đó không hỗ trợ unsafe block
+// ──────────────────────────────────────────────
+
+struct SnapGuard(HANDLE);
+
+impl Drop for SnapGuard {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe { let _ = CloseHandle(self.0); }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────
 // SafeHandle
 // ──────────────────────────────────────────────
 
@@ -33,14 +48,19 @@ impl SafeHandle {
     pub fn is_valid(&self) -> bool {
         !self.handle.is_invalid() && self.handle != HANDLE(0)
     }
-}
 
-impl Drop for SafeHandle {
-    fn drop(&mut self) {
+    /// pub để memory.rs gọi được (_try_attach)
+    pub fn close(&mut self) {
         if self.is_valid() {
             unsafe { let _ = CloseHandle(self.handle); }
             self.handle = HANDLE(0);
         }
+    }
+}
+
+impl Drop for SafeHandle {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -55,32 +75,26 @@ impl SafeHandle {
     #[getter]
     fn module_size(&self) -> u32 { self.module_size }
 
-    fn close(&mut self) {
-        if self.is_valid() {
-            unsafe { let _ = CloseHandle(self.handle); }
-            self.handle = HANDLE(0);
-        }
-    }
+    // Python-facing close — delegate sang pub fn ở trên
+    fn close(&mut self) { SafeHandle::close(self) }
 }
 
 // ──────────────────────────────────────────────
-// ProcessManager — Rust-visible API (pub)
+// ProcessManager — internal Rust API (pub fn, tên khác để tránh E0592)
 // ──────────────────────────────────────────────
 
 #[pyclass]
 pub struct ProcessManager;
 
 impl ProcessManager {
-    pub fn find_pid(&self, process_name: &str) -> PyResult<u32> {
+    pub fn find_pid_inner(&self, process_name: &str) -> PyResult<u32> {
         let name_lower = process_name.to_lowercase();
 
         let snap = unsafe {
             CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
                 .map_err(|e| ProcessNotFound::new_err(format!("CreateToolhelp32Snapshot: {e}")))?
         };
-
-        // Fix: defer! không cho phép let statement — dùng expression trực tiếp
-        let _guard = scopeguard::defer!(unsafe { CloseHandle(snap).ok(); });
+        let _guard = SnapGuard(snap);
 
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -102,7 +116,7 @@ impl ProcessManager {
         Err(ProcessNotFound::new_err(format!("Process not found: {process_name:?}")))
     }
 
-    pub fn get_module_base(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
+    pub fn get_module_base_inner(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
         let name_lower = module_name.to_lowercase();
         let flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32;
 
@@ -110,9 +124,7 @@ impl ProcessManager {
             CreateToolhelp32Snapshot(flags, pid)
                 .map_err(|e| ModuleNotFound::new_err(format!("CreateToolhelp32Snapshot: {e}")))?
         };
-
-        // Fix: defer! không cho phép let statement — dùng expression trực tiếp
-        let _guard = scopeguard::defer!(unsafe { CloseHandle(snap).ok(); });
+        let _guard = SnapGuard(snap);
 
         let mut entry = MODULEENTRY32W {
             dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
@@ -138,7 +150,7 @@ impl ProcessManager {
         )))
     }
 
-    pub fn open_process(&self, pid: u32) -> PyResult<SafeHandle> {
+    pub fn open_process_inner(&self, pid: u32) -> PyResult<SafeHandle> {
         let handle = unsafe {
             OpenProcess(PROCESS_ALL_ACCESS, false, pid)
                 .map_err(|e| ProcessNotFound::new_err(format!("OpenProcess pid={pid}: {e}")))?
@@ -149,7 +161,7 @@ impl ProcessManager {
 
 // ──────────────────────────────────────────────
 // ProcessManager — Python API (#[pymethods])
-// Delegate sang impl block ở trên để tránh E0624
+// Delegate sang *_inner để không bị E0592 duplicate
 // ──────────────────────────────────────────────
 
 #[pymethods]
@@ -158,15 +170,15 @@ impl ProcessManager {
     fn new() -> Self { Self }
 
     fn find_pid(&self, process_name: &str) -> PyResult<u32> {
-        ProcessManager::find_pid(self, process_name)
+        self.find_pid_inner(process_name)
     }
 
     fn get_module_base(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
-        ProcessManager::get_module_base(self, pid, module_name)
+        self.get_module_base_inner(pid, module_name)
     }
 
     fn open_process(&self, pid: u32) -> PyResult<SafeHandle> {
-        ProcessManager::open_process(self, pid)
+        self.open_process_inner(pid)
     }
 }
 

@@ -11,6 +11,7 @@ Backend memory I/O và pattern scanner viết bằng Rust — nhanh hơn 10-50x 
 |---|---|
 | `main.exe` | [click here](https://github.com/darkduy/Velostrap-Injector/releases/latest/download/main.exe) |
 | `mainDEBUG.exe` | [click here](https://github.com/darkduy/Velostrap-Injector/releases/latest/download/mainDEBUG.exe) |
+| `app.zip` | [click here](https://github.com/darkduy/Velostrap-Injector/releases/latest/download/app.zip) |
 
 > **mainDEBUG.exe** là bản hiện log chi tiết — dùng khi flags không apply được để debug lỗi.
 

@@ -12,14 +12,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: pip install pyinstaller
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install maturin
+        run: pip install maturin pyinstaller
+
+      - name: Build Rust core_rs
+        working-directory: core_rs
+        run: maturin build --release --target x86_64-pc-windows-msvc --out ../dist_rs
+
+      - name: Copy .pyd into core/
+        run: |
+          $pyd = Get-ChildItem dist_rs -Filter "*.pyd" | Select-Object -First 1
+          Copy-Item $pyd.FullName -Destination core\core_rs.pyd
 
       - name: Build EXE (release)
-        run: pyinstaller --onefile --console --name main main.py
+        run: |
+          pyinstaller --onefile --console --name main `
+            --add-binary "core\core_rs.pyd;core" main.py
 
       - name: Build EXE (debug)
-        run: pyinstaller --onefile --console --name mainDEBUG --add-data "core;core" main.py
+        run: |
+          pyinstaller --onefile --console --name mainDEBUG `
+            --add-binary "core\core_rs.pyd;core" main.py
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

@@ -3,7 +3,7 @@ main.py — Roblox FFlag injector via direct memory manipulation.
 Reads flag definitions from fflags.json and writes them into a running
 RobloxPlayerBeta.exe process using the NtDll memory layer.
 
-Offset tìm động qua pattern scan (core/scanner.py) — không cần server hay offset cứng.
+Offset tìm động qua pattern scan (core_rs) — không cần server hay offset cứng.
 
 ── Cập nhật sau Roblox update ──────────────────────────────────────────────────
 Nếu flags không apply được sau update, kiểm tra và sửa các OFF_* constants bên dưới
@@ -19,7 +19,7 @@ from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
 from core.memory import MemoryManager, AttachTimeoutError
-from core.scanner import PatternScanner
+from core import PatternScanner
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ class FlagInjector:
             raise RuntimeError(
                 "Pattern scan failed — FFlagList not found.\n"
                 "      Roblox có thể đã update và đổi instruction pattern.\n"
-                "      Xem README.md → 'Cập nhật core/scanner.py' để biết cách fix."
+                "      Xem README.md → 'Cập nhật core_rs/src/scanner.rs' để biết cách fix."
             )
         self._flag_list_offset = offset
         print(f"[ + ] FFlagList offset: 0x{offset:X}")

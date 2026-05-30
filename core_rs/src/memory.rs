@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 
-use crate::errors::{
-    AttachTimeout, MemoryError, ModuleNotFound, ProcessNotFound, StringCapacity, ntstatus_str,
-};
+use crate::errors::{AttachTimeout, MemoryError, StringCapacity, ntstatus_str};
 use crate::process::{ProcessManager, SafeHandle};
 
 // ──────────────────────────────────────────────

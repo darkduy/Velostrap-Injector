@@ -15,8 +15,7 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
 use crate::errors::{ModuleNotFound, ProcessNotFound};
 
 // ──────────────────────────────────────────────
-// SnapGuard — RAII wrapper để tự động CloseHandle snapshot
-// Thay thế scopeguard::defer! vì macro đó không hỗ trợ unsafe block
+// SnapGuard — RAII đóng snapshot handle
 // ──────────────────────────────────────────────
 
 struct SnapGuard(HANDLE);
@@ -49,8 +48,8 @@ impl SafeHandle {
         !self.handle.is_invalid() && self.handle != HANDLE(0)
     }
 
-    /// pub để memory.rs gọi được (_try_attach)
-    pub fn close(&mut self) {
+    /// Rust-visible close — tên khác với pymethods để tránh E0592
+    pub fn close_handle(&mut self) {
         if self.is_valid() {
             unsafe { let _ = CloseHandle(self.handle); }
             self.handle = HANDLE(0);
@@ -60,7 +59,7 @@ impl SafeHandle {
 
 impl Drop for SafeHandle {
     fn drop(&mut self) {
-        self.close();
+        self.close_handle();
     }
 }
 
@@ -75,12 +74,12 @@ impl SafeHandle {
     #[getter]
     fn module_size(&self) -> u32 { self.module_size }
 
-    // Python-facing close — delegate sang pub fn ở trên
-    fn close(&mut self) { SafeHandle::close(self) }
+    /// Python-facing `close()` — gọi close_handle bên dưới
+    fn close(&mut self) { self.close_handle() }
 }
 
 // ──────────────────────────────────────────────
-// ProcessManager — internal Rust API (pub fn, tên khác để tránh E0592)
+// ProcessManager — Rust-visible (pub, tên *_inner)
 // ──────────────────────────────────────────────
 
 #[pyclass]
@@ -160,8 +159,7 @@ impl ProcessManager {
 }
 
 // ──────────────────────────────────────────────
-// ProcessManager — Python API (#[pymethods])
-// Delegate sang *_inner để không bị E0592 duplicate
+// ProcessManager — Python API
 // ──────────────────────────────────────────────
 
 #[pymethods]

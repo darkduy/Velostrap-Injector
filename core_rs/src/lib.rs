@@ -4,6 +4,7 @@ mod process;
 mod scanner;
 
 use pyo3::prelude::*;
+use pyo3::PyTypeInfo;
 
 #[pymodule]
 fn core_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {

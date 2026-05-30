@@ -68,7 +68,7 @@ Velostrap-Injector/
 | File | Tần suất | Lý do |
 |---|---|---|
 | `main.py` | Cao | `OFF_*` constants thay đổi khi struct layout đổi |
-| `core_rs/src/scanner.rs` | Trung bình | Patterns thay đổi khi compiler đổi instruction |
+| `core_rs/src/scanner.rs` | Trung bình | LEA opcodes thay đổi khi Roblox đổi register |
 | `core_rs/src/memory.rs` | Thấp | Windows API ổn định |
 | `core_rs/src/process.rs` | Thấp | Toolhelp32 API ổn định |
 
@@ -214,7 +214,11 @@ Sau khi sửa xong `main.py`, push lên GitHub. Workflow tự build lại cả h
 
 ### Trường hợp 2 — Tool báo "Pattern scan failed"
 
-Nghĩa là Roblox đã đổi instruction truy cập FFlagList. Cần thêm pattern mới vào `core_rs/src/scanner.rs` rồi rebuild.
+Nghĩa là Roblox đã đổi register trong instruction truy cập FFlagList (ví dụ từ `lea rax` sang một register khác mà scanner chưa cover).
+
+> **Lưu ý:** Scanner hiện tại (`scanner.rs`) tự generate tất cả LEA variants cho registers `rax`, `rcx`, `rdx`, `rbx`, `rsi`, `rdi`, `r8`–`r15` lúc runtime — không hardcode pattern cố định. Vì vậy trường hợp này ít xảy ra hơn so với version cũ.
+>
+> Nếu vẫn fail, khả năng cao Roblox đã dùng một cách truy cập FFlagList hoàn toàn khác (không còn là `lea [rip+disp32]`).
 
 **Tool cần có:** [x64dbg](https://x64dbg.com/)
 
@@ -242,7 +246,7 @@ Dùng Cheat Engine theo Trường hợp 1 → Bước 2.
 
 ---
 
-#### Bước 4 — Đọc bytes của instruction
+#### Bước 4 — Đọc instruction tại kết quả tìm được
 
 Double-click vào một kết quả → x64dbg nhảy đến CPU View.
 
@@ -253,35 +257,88 @@ Bytes                  Disassembly
 48 89 C1               mov rcx, rax
 ```
 
-- `48 8D 05` = opcode của `lea rax`
-- `48 8D 0D` = opcode của `lea rcx`
-- `48 8D 15` = opcode của `lea rdx`
-- 4 bytes tiếp theo = disp32, **luôn thay đổi** → dùng `None` (wildcard)
-- Bytes sau đó = thêm vào để tránh false positive
+**Nếu instruction vẫn là dạng `lea [rip+disp32]`** (REX byte `48` hoặc `4C`, tiếp theo là `8D`, tiếp theo là ModRM):
+
+Kiểm tra xem REX và ModRM có nằm trong danh sách sau không:
+
+| REX | ModRM | Register |
+|-----|-------|----------|
+| `48` | `05` | rax |
+| `48` | `0D` | rcx |
+| `48` | `15` | rdx |
+| `48` | `1D` | rbx |
+| `48` | `35` | rsi |
+| `48` | `3D` | rdi |
+| `4C` | `05` | r8  |
+| `4C` | `0D` | r9  |
+| `4C` | `15` | r10 |
+| `4C` | `1D` | r11 |
+| `4C` | `35` | r14 |
+| `4C` | `3D` | r15 |
+
+Nếu REX/ModRM **đã có trong bảng** nhưng scan vẫn fail → vấn đề nằm ở verify logic, không phải opcode. Xem Bước 5A.
+
+Nếu REX/ModRM **chưa có trong bảng** → cần thêm vào. Xem Bước 5B.
+
+**Nếu instruction không phải dạng `lea [rip+disp32]`** — ví dụ Roblox dùng `mov` với absolute address hoặc indirect load — xem Bước 5C.
 
 ---
 
-#### Bước 5 — Thêm pattern vào core_rs/src/scanner.rs
+#### Bước 5A — Verify logic fail (opcode đúng nhưng vẫn không tìm được)
 
-Mở `core_rs/src/scanner.rs`, tìm `const PATTERNS`, thêm dòng mới:
+Mở `core_rs/src/scanner.rs`, tìm hàm `verify_fflaglist`. Vấn đề có thể là:
 
+- `find_map_mask` không nhận ra mask value vì nằm ngoài range `0x3F..=0xFFFF`. Mở rộng range:
 ```rust
-const PATTERNS: &[Pattern] = &[
-    // Các pattern cũ — giữ lại
-    &[Some(0x48), Some(0x8D), Some(0x05), None, None, None, None, Some(0x48), Some(0x89)],
-    &[Some(0x48), Some(0x8D), Some(0x05), None, None, None, None, Some(0x48), Some(0x8B)],
-
-    // Pattern mới — thay 0xXX bằng bytes thực tế từ Bước 4
-    &[Some(0x48), Some(0x8D), Some(0x05), None, None, None, None, Some(0xXX), Some(0xXX)],
-];
+if val >= 0x3F && val <= 0xFFFF && (val & val.wrapping_add(1)) == 0 {
+```
+Sửa thành:
+```rust
+if val >= 0x0F && val <= 0x3FFFF && (val & val.wrapping_add(1)) == 0 {
 ```
 
-**Ví dụ:** nếu x64dbg hiện `48 8D 05 ?? ?? ?? ?? 48 8B 43 10` thì thêm:
+- `find_map_list` không tìm được pointer vì hashmap không còn ở `FFlagList + 8`. Thử các offset khác (`+0x10`, `+0x18`) bằng cách sửa dòng:
 ```rust
-&[Some(0x48), Some(0x8D), Some(0x05), None, None, None, None, Some(0x48), Some(0x8B)],
+let map_data = match self.mem.read_raw(self.handle, fflaglist + 8, 96) {
 ```
 
-Push lên GitHub → workflow tự build lại.
+---
+
+#### Bước 5B — Thêm REX/ModRM mới vào scanner
+
+Mở `core_rs/src/scanner.rs`, tìm hàm `all_lea_opcodes`, thêm cặp REX/ModRM mới:
+
+```rust
+fn all_lea_opcodes() -> Vec<(u8, u8)> {
+    vec![
+        // ... các cặp hiện có ...
+
+        // Thêm cặp mới — thay 0xXX bằng REX và ModRM từ Bước 4
+        (0xXX, 0xXX),
+    ]
+}
+```
+
+**Ví dụ:** nếu x64dbg hiện `4D 8D 05 ...` (REX=`4D`, ModRM=`05`) thì thêm:
+```rust
+(0x4D, 0x05), // lea r8 (REX.W + REX.R + REX.B)
+```
+
+---
+
+#### Bước 5C — Roblox dùng instruction hoàn toàn khác
+
+Đây là trường hợp phức tạp nhất — Roblox không còn dùng `lea [rip+disp32]` nữa.
+
+Nhìn vào instruction trong CPU View của x64dbg và xác định pattern mới. Sau đó sửa hàm `scan_chunk` trong `core_rs/src/scanner.rs` để nhận dạng pattern mới đó, giữ lại logic `verify_fflaglist` vì vẫn còn dùng được.
+
+---
+
+#### Bước 6 — Rebuild và push
+
+Sau khi sửa `scanner.rs`, push lên GitHub → workflow tự build lại cả hai file.
+
+Khác với Trường hợp 1 (chỉ sửa `main.py`, không cần rebuild Rust), Trường hợp 2 **bắt buộc phải rebuild** vì `scanner.rs` là Rust code.
 
 ---
 

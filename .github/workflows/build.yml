@@ -20,13 +20,21 @@ jobs:
       - name: Install maturin
         run: pip install maturin pyinstaller
 
+      - name: Cache Rust build
+        id: cache-rust
+        uses: actions/cache@v4
+        with:
+          path: core_rs
+          key: rust-${{ hashFiles('core_rs/**') }}
+
       - name: Build Rust core_rs
+        if: steps.cache-rust.outputs.cache-hit != 'true'
         working-directory: core_rs
         run: maturin build --release --target x86_64-pc-windows-msvc --out ../dist_rs
 
       - name: Copy .pyd into core/
         run: |
-          $pyd = Get-ChildItem dist_rs -Filter "*.pyd" | Select-Object -First 1
+          $pyd = Get-ChildItem core_rs\dist_rs -Filter "*.pyd" | Select-Object -First 1
           Copy-Item $pyd.FullName -Destination core\core_rs.pyd
 
       - name: Build EXEs (release + debug)
@@ -43,3 +51,11 @@ jobs:
           path: |
             dist/main.exe
             dist/mainDEBUG.exe
+
+      - name: Clean workflow artifacts
+        if: always()
+        run: |
+          Remove-Item -Recurse -Force dist_rs -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+          Remove-Item -Force *.spec -ErrorAction SilentlyContinue

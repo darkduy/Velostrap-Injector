@@ -24,10 +24,6 @@ jobs:
         working-directory: core_rs
         run: maturin build --release --target x86_64-pc-windows-msvc --out ../dist_rs
 
-      - name: Clean Rust build
-        working-directory: core_rs
-        run: cargo clean
-
       - name: Copy .pyd into core/
         run: |
           $pyd = Get-ChildItem dist_rs -Filter "*.pyd" | Select-Object -First 1

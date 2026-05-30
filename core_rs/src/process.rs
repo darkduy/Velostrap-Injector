@@ -64,18 +64,14 @@ impl SafeHandle {
 }
 
 // ──────────────────────────────────────────────
-// ProcessManager
+// ProcessManager — Rust-visible API (pub)
 // ──────────────────────────────────────────────
 
 #[pyclass]
 pub struct ProcessManager;
 
-#[pymethods]
 impl ProcessManager {
-    #[new]
-    fn new() -> Self { Self }
-
-    fn find_pid(&self, process_name: &str) -> PyResult<u32> {
+    pub fn find_pid(&self, process_name: &str) -> PyResult<u32> {
         let name_lower = process_name.to_lowercase();
 
         let snap = unsafe {
@@ -83,8 +79,8 @@ impl ProcessManager {
                 .map_err(|e| ProcessNotFound::new_err(format!("CreateToolhelp32Snapshot: {e}")))?
         };
 
-        // Fix: dùng scopeguard::defer! (macro, không phải function)
-        let _guard = scopeguard::defer!(unsafe { let _ = CloseHandle(snap); });
+        // Fix: defer! không cho phép let statement — dùng expression trực tiếp
+        let _guard = scopeguard::defer!(unsafe { CloseHandle(snap).ok(); });
 
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -106,7 +102,7 @@ impl ProcessManager {
         Err(ProcessNotFound::new_err(format!("Process not found: {process_name:?}")))
     }
 
-    fn get_module_base(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
+    pub fn get_module_base(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
         let name_lower = module_name.to_lowercase();
         let flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32;
 
@@ -115,8 +111,8 @@ impl ProcessManager {
                 .map_err(|e| ModuleNotFound::new_err(format!("CreateToolhelp32Snapshot: {e}")))?
         };
 
-        // Fix: dùng scopeguard::defer! (macro)
-        let _guard = scopeguard::defer!(unsafe { let _ = CloseHandle(snap); });
+        // Fix: defer! không cho phép let statement — dùng expression trực tiếp
+        let _guard = scopeguard::defer!(unsafe { CloseHandle(snap).ok(); });
 
         let mut entry = MODULEENTRY32W {
             dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32,
@@ -142,12 +138,35 @@ impl ProcessManager {
         )))
     }
 
-    fn open_process(&self, pid: u32) -> PyResult<SafeHandle> {
+    pub fn open_process(&self, pid: u32) -> PyResult<SafeHandle> {
         let handle = unsafe {
             OpenProcess(PROCESS_ALL_ACCESS, false, pid)
                 .map_err(|e| ProcessNotFound::new_err(format!("OpenProcess pid={pid}: {e}")))?
         };
         Ok(SafeHandle::new(handle))
+    }
+}
+
+// ──────────────────────────────────────────────
+// ProcessManager — Python API (#[pymethods])
+// Delegate sang impl block ở trên để tránh E0624
+// ──────────────────────────────────────────────
+
+#[pymethods]
+impl ProcessManager {
+    #[new]
+    fn new() -> Self { Self }
+
+    fn find_pid(&self, process_name: &str) -> PyResult<u32> {
+        ProcessManager::find_pid(self, process_name)
+    }
+
+    fn get_module_base(&self, pid: u32, module_name: &str) -> PyResult<(u64, u32)> {
+        ProcessManager::get_module_base(self, pid, module_name)
+    }
+
+    fn open_process(&self, pid: u32) -> PyResult<SafeHandle> {
+        ProcessManager::open_process(self, pid)
     }
 }
 

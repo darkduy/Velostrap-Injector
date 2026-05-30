@@ -265,7 +265,7 @@ impl MemoryManager {
 
         let (base, size) = match self.proc.get_module_base_inner(pid, module_name) {
             Ok(v)  => v,
-            Err(e) => { safe.close(); return Err(e); }
+            Err(e) => { safe.close_handle(); return Err(e); }
         };
 
         safe.module_base = base;

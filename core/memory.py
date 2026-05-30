@@ -1,14 +1,22 @@
 """
 memory.py — Windows process memory utilities via NtDll + Kernel32.
 Wraps NtReadVirtualMemory / NtWriteVirtualMemory for low-level access.
+
+Memory leak prevention:
+- Tất cả Win32 handles được wrap trong SafeHandle (context manager)
+- Snapshot handles luôn đóng qua finally block
+- Process handle trong attach() được đóng đúng trong mọi trường hợp lỗi
+- CloseHandle luôn verify return value và log nếu fail
+- Caller dùng `with` statement — không thể quên close handle
 """
 
 import ctypes
 import ctypes.wintypes as wintypes
 import logging
 import time
+from contextlib import contextmanager
 from ctypes import POINTER, Structure, byref, c_size_t, c_ulong, c_void_p, sizeof, windll
-from typing import Optional, Tuple
+from typing import Generator, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -16,18 +24,19 @@ log = logging.getLogger(__name__)
 # Constants
 # ──────────────────────────────────────────────
 
-PROCESS_ALL_ACCESS    = 0x1F0FFF
-TH32CS_SNAPPROCESS    = 0x00000002
-TH32CS_SNAPMODULE     = 0x00000008
-TH32CS_SNAPMODULE32   = 0x00000010
+PROCESS_ALL_ACCESS  = 0x1F0FFF
+TH32CS_SNAPPROCESS  = 0x00000002
+TH32CS_SNAPMODULE   = 0x00000008
+TH32CS_SNAPMODULE32 = 0x00000010
 
-# FFlag struct defaults
-FFLAG_STRUCT_SIZE     = 0xD0
-FFLAG_STRING_BUF_OFF  = 0x00  # offset to buffer ptr inside string instance
-FFLAG_STRING_LEN_OFF  = 0x08  # offset to length field
-FFLAG_STRING_CAP_OFF  = 0x10  # offset to capacity field
+FFLAG_STRUCT_SIZE   = 0xD0
+FFLAG_STRING_BUF_OFF = 0x00
+FFLAG_STRING_LEN_OFF = 0x08
+FFLAG_STRING_CAP_OFF = 0x10
 
-INVALID_HANDLE        = -1
+# Win32 sentinel values
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value  # 0xFFFFFFFFFFFFFFFF on 64-bit
+NULL_HANDLE          = 0
 
 
 # ──────────────────────────────────────────────
@@ -78,10 +87,98 @@ class ModuleNotFoundError(Exception):
     """Raised when the target module cannot be found in a process."""
 
 class AttachTimeoutError(Exception):
-    """Raised when attach_process exceeds the given timeout."""
+    """Raised when attach() exceeds the given timeout."""
 
 class StringCapacityError(Exception):
     """Raised when the new string value exceeds the in-process buffer capacity."""
+
+
+# ──────────────────────────────────────────────
+# SafeHandle — RAII wrapper cho Win32 handle
+# ──────────────────────────────────────────────
+
+class SafeHandle:
+    """
+    RAII wrapper cho Win32 HANDLE.
+
+    Đảm bảo CloseHandle luôn được gọi kể cả khi có exception,
+    tránh handle leak hoàn toàn.
+
+    Dùng như context manager::
+
+        with SafeHandle(raw_handle) as h:
+            do_something(h.value)
+        # handle đã được đóng ở đây
+
+    Hoặc manual::
+
+        h = SafeHandle(raw_handle)
+        try:
+            do_something(h.value)
+        finally:
+            h.close()
+    """
+
+    _k32 = windll.kernel32
+
+    def __init__(self, handle: int) -> None:
+        self._handle  = handle
+        self._closed  = False
+
+    @property
+    def value(self) -> int:
+        return self._handle
+
+    @property
+    def is_valid(self) -> bool:
+        return (
+            self._handle != NULL_HANDLE
+            and self._handle != INVALID_HANDLE_VALUE
+            and not self._closed
+        )
+
+    def close(self) -> None:
+        """Đóng handle. Idempotent — gọi nhiều lần không có side effect."""
+        if self._closed or not self.is_valid:
+            return
+        self._closed = True
+        result = self._k32.CloseHandle(self._handle)
+        if not result:
+            gle = self._k32.GetLastError()
+            log.warning("CloseHandle failed for 0x%X (GLE=%d)", self._handle, gle)
+        else:
+            log.debug("CloseHandle OK for 0x%X", self._handle)
+        self._handle = NULL_HANDLE
+
+    def detach(self) -> int:
+        """
+        Trả về raw handle và từ bỏ ownership.
+        Dùng khi muốn transfer handle ra ngoài mà không đóng.
+        """
+        self._closed = True
+        h = self._handle
+        self._handle = NULL_HANDLE
+        return h
+
+    def __enter__(self) -> "SafeHandle":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Fallback — đóng nếu caller quên không dùng context manager
+        if not self._closed and self.is_valid:
+            log.warning(
+                "SafeHandle 0x%X garbage collected without explicit close — "
+                "use 'with' statement or call .close() explicitly",
+                self._handle,
+            )
+            self.close()
+
+    def __repr__(self) -> str:
+        state = "closed" if self._closed else f"0x{self._handle:X}"
+        return f"SafeHandle({state})"
 
 
 # ──────────────────────────────────────────────
@@ -91,8 +188,7 @@ class StringCapacityError(Exception):
 class NtMemory:
     """
     Thin wrapper around NtReadVirtualMemory / NtWriteVirtualMemory.
-    Prefer these over the Kernel32 equivalents to avoid certain
-    user-mode hooks that target ReadProcessMemory/WriteProcessMemory.
+    Dùng NtDll thay Kernel32 để tránh user-mode hooks.
     """
 
     NT_SUCCESS = 0
@@ -115,12 +211,8 @@ class NtMemory:
     # ── raw bytes ──────────────────────────────
 
     def read(self, handle: int, address: int, size: int) -> bytes:
-        """Read *size* bytes from *address* in the target process.
-
-        Raises MemoryError on failure.
-        """
-        buf = ctypes.create_string_buffer(size)
-        n   = c_size_t(0)
+        buf    = ctypes.create_string_buffer(size)
+        n      = c_size_t(0)
         status = self._read(handle, c_void_p(address), buf, size, byref(n))
         if status != self.NT_SUCCESS:
             raise MemoryError(
@@ -130,10 +222,6 @@ class NtMemory:
         return buf.raw[: n.value]
 
     def write(self, handle: int, address: int, data: bytes) -> None:
-        """Write *data* to *address* in the target process.
-
-        Raises MemoryError on failure.
-        """
         buf    = ctypes.create_string_buffer(data)
         n      = c_size_t(0)
         status = self._write(handle, c_void_p(address), buf, len(data), byref(n))
@@ -174,59 +262,60 @@ class ProcessManager:
     def __init__(self) -> None:
         self._k32 = windll.kernel32
 
-    # ── internal helpers ───────────────────────
-
     @staticmethod
     def _decode(raw: bytes) -> str:
         return raw.decode("utf-8", errors="ignore").lower()
 
-    def _close(self, handle: int) -> None:
-        self._k32.CloseHandle(handle)
-
-    # ── public API ─────────────────────────────
+    def _is_valid_snap(self, snap: int) -> bool:
+        return snap != NULL_HANDLE and snap != INVALID_HANDLE_VALUE
 
     def find_pid(self, process_name: str) -> int:
-        """Return the PID of the first process matching *process_name*.
+        """Return PID của process đầu tiên match *process_name*.
 
-        Raises ProcessNotFoundError if not found.
+        Raises ProcessNotFoundError nếu không tìm thấy.
+        Snapshot handle luôn được đóng kể cả khi có exception.
         """
         name = process_name.lower()
         snap = self._k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if snap == INVALID_HANDLE:
-            raise ProcessNotFoundError(f"Cannot create process snapshot (GLE={self._k32.GetLastError()})")
 
-        entry = PROCESSENTRY32()
-        entry.dwSize = sizeof(PROCESSENTRY32)
+        if not self._is_valid_snap(snap):
+            raise ProcessNotFoundError(
+                f"Cannot create process snapshot (GLE={self._k32.GetLastError()})"
+            )
 
-        try:
+        with SafeHandle(snap):  # đảm bảo đóng snapshot trong mọi trường hợp
+            entry = PROCESSENTRY32()
+            entry.dwSize = sizeof(PROCESSENTRY32)
+
             if self._k32.Process32First(snap, byref(entry)):
                 while True:
                     if self._decode(entry.szExeFile) == name:
                         return entry.th32ProcessID
                     if not self._k32.Process32Next(snap, byref(entry)):
                         break
-        finally:
-            self._close(snap)
 
         raise ProcessNotFoundError(f"Process not found: {process_name!r}")
 
     def get_module_base(self, pid: int, module_name: str) -> Tuple[int, int]:
-        """Return *(base_address, size)* of *module_name* inside *pid*.
+        """Return *(base_address, size)* của *module_name* trong *pid*.
 
-        Raises ModuleNotFoundError if not found.
+        Raises ModuleNotFoundError nếu không tìm thấy.
+        Snapshot handle luôn được đóng kể cả khi có exception.
         """
-        name = module_name.lower()
+        name  = module_name.lower()
         flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
         snap  = self._k32.CreateToolhelp32Snapshot(flags, pid)
-        if snap == INVALID_HANDLE:
+
+        if not self._is_valid_snap(snap):
             raise ModuleNotFoundError(
-                f"Cannot create module snapshot for pid={pid} (GLE={self._k32.GetLastError()})"
+                f"Cannot create module snapshot for pid={pid} "
+                f"(GLE={self._k32.GetLastError()})"
             )
 
-        entry = MODULEENTRY32()
-        entry.dwSize = sizeof(MODULEENTRY32)
+        with SafeHandle(snap):  # đảm bảo đóng snapshot trong mọi trường hợp
+            entry = MODULEENTRY32()
+            entry.dwSize = sizeof(MODULEENTRY32)
 
-        try:
             if self._k32.Module32First(snap, byref(entry)):
                 while True:
                     if self._decode(entry.szModule) == name:
@@ -234,28 +323,21 @@ class ProcessManager:
                         return base, entry.modBaseSize
                     if not self._k32.Module32Next(snap, byref(entry)):
                         break
-        finally:
-            self._close(snap)
 
         raise ModuleNotFoundError(f"Module not found: {module_name!r} in pid={pid}")
 
-    def open_process(self, pid: int) -> int:
-        """Open *pid* with PROCESS_ALL_ACCESS. Returns a valid handle.
+    def open_process(self, pid: int) -> SafeHandle:
+        """Open *pid* với PROCESS_ALL_ACCESS. Trả về SafeHandle.
 
         Raises ProcessNotFoundError on failure.
+        Caller chịu trách nhiệm đóng handle bằng .close() hoặc with statement.
         """
-        handle = self._k32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-        if not handle:
+        raw = self._k32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not raw:
             raise ProcessNotFoundError(
                 f"OpenProcess failed for pid={pid} (GLE={self._k32.GetLastError()})"
             )
-        return handle
-
-
-def close_handle(handle: int) -> None:
-    """Safely close a Win32 handle."""
-    if handle:
-        windll.kernel32.CloseHandle(handle)
+        return SafeHandle(raw)
 
 
 # ──────────────────────────────────────────────
@@ -264,54 +346,115 @@ def close_handle(handle: int) -> None:
 
 class MemoryManager:
     """
-    High-level façade: attach to a process and manipulate FFlag structs.
+    High-level façade: attach vào process và manipulate FFlag structs.
 
-    Usage::
+    Dùng context manager để đảm bảo process handle luôn được đóng::
 
         mm = MemoryManager()
-        handle, base, size = mm.attach("RobloxPlayerBeta.exe", "RobloxPlayerBeta.exe")
-        mm.write_fflag_int(handle, base + OFFSET, VALUE_PTR_OFFSET, 1)
-        close_handle(handle)
+        with mm.attach("RobloxPlayerBeta.exe", "RobloxPlayerBeta.exe") as (handle, base, size):
+            mm.write_fflag_int(handle, base + OFFSET, VALUE_PTR_OFFSET, 1)
+        # handle tự động đóng ở đây
+
+    Hoặc manual (không khuyến khích)::
+
+        handle, base, size = mm.attach_raw(...)
+        try:
+            mm.write_fflag_int(handle, ...)
+        finally:
+            handle.close()
     """
 
     def __init__(self) -> None:
         self.mem  = NtMemory()
         self.proc = ProcessManager()
 
-    # ── attach ─────────────────────────────────
+    # ── attach (context manager) ───────────────
 
+    @contextmanager
     def attach(
         self,
-        process_name: str,
-        module_name:  str,
+        process_name:  str,
+        module_name:   str,
         poll_interval: float = 1.0,
         timeout:       Optional[float] = None,
-    ) -> Tuple[int, int, int]:
+    ) -> Generator[Tuple[int, int, int], None, None]:
         """
-        Poll until *process_name* is running and *module_name* is loaded,
-        then return *(process_handle, module_base, module_size)*.
+        Context manager — poll cho đến khi attach được, yield (handle, base, size),
+        rồi tự đóng handle khi thoát khỏi block.
 
-        Args:
-            process_name:  e.g. ``"game.exe"``
-            module_name:   e.g. ``"game.exe"`` or ``"engine.dll"``
-            poll_interval: seconds between retries (default 1.0)
-            timeout:       give up after this many seconds; raises
-                           AttachTimeoutError. None = wait forever.
+        Usage::
+
+            with mm.attach("game.exe", "game.exe") as (handle, base, size):
+                mm.write_fflag_int(handle, base + offset, value_offset, 1)
+        """
+        safe_handle = self._poll_attach(process_name, module_name, poll_interval, timeout)
+        try:
+            yield safe_handle.value, safe_handle._module_base, safe_handle._module_size
+        finally:
+            safe_handle.close()
+
+    def attach_raw(
+        self,
+        process_name:  str,
+        module_name:   str,
+        poll_interval: float = 1.0,
+        timeout:       Optional[float] = None,
+    ) -> Tuple["SafeHandle", int, int]:
+        """
+        Attach và trả về (SafeHandle, base, size) — caller chịu trách nhiệm đóng handle.
+        Dùng khi cần giữ handle lâu hơn một block.
+
+        Usage::
+
+            handle, base, size = mm.attach_raw("game.exe", "game.exe")
+            try:
+                ...
+            finally:
+                handle.close()
+        """
+        return self._poll_attach(process_name, module_name, poll_interval, timeout)
+
+    def _poll_attach(
+        self,
+        process_name:  str,
+        module_name:   str,
+        poll_interval: float,
+        timeout:       Optional[float],
+    ) -> "SafeHandle":
+        """
+        Internal — poll loop thực sự.
+
+        Xử lý memory leak cases:
+        - Nếu open_process thành công nhưng get_module_base fail → đóng handle ngay
+        - Nếu get_module_base throw exception không phải ModuleNotFoundError → đóng handle trước khi re-raise
+        - Nếu timeout → không leak handle nào vì handle chỉ được tạo sau khi attach thành công
         """
         deadline = None if timeout is None else time.monotonic() + timeout
 
         while True:
             try:
-                pid    = self.proc.find_pid(process_name)
-                handle = self.proc.open_process(pid)
+                pid         = self.proc.find_pid(process_name)
+                safe_handle = self.proc.open_process(pid)
+
                 try:
                     base, size = self.proc.get_module_base(pid, module_name)
-                    log.info("Attached to %r pid=%d base=0x%X size=0x%X", process_name, pid, base, size)
-                    return handle, base, size
-                except ModuleNotFoundError:
-                    close_handle(handle)
-            except (ProcessNotFoundError, ModuleNotFoundError) as exc:
-                log.debug("Waiting for process: %s", exc)
+                except Exception:
+                    safe_handle.close()  # đóng handle trước khi retry hoặc re-raise
+                    raise
+
+                # Gắn thêm metadata vào handle để context manager có thể yield
+                safe_handle._module_base = base
+                safe_handle._module_size = size
+                log.info(
+                    "Attached to %r pid=%d base=0x%X size=0x%X",
+                    process_name, pid, base, size,
+                )
+                return safe_handle
+
+            except ModuleNotFoundError as exc:
+                log.debug("Module not ready: %s", exc)
+            except ProcessNotFoundError as exc:
+                log.debug("Process not found: %s", exc)
 
             if deadline is not None and time.monotonic() >= deadline:
                 raise AttachTimeoutError(
@@ -323,9 +466,9 @@ class MemoryManager:
 
     def _read_fflag_struct(
         self,
-        handle:           int,
-        fflag_addr:       int,
-        struct_size:      int = FFLAG_STRUCT_SIZE,
+        handle:      int,
+        fflag_addr:  int,
+        struct_size: int = FFLAG_STRUCT_SIZE,
     ) -> bytes:
         data = self.mem.read(handle, fflag_addr, struct_size)
         if len(data) < struct_size:
@@ -345,48 +488,27 @@ class MemoryManager:
 
     def write_fflag_int(
         self,
-        handle:          int,
-        fflag_addr:      int,
+        handle:           int,
+        fflag_addr:       int,
         value_ptr_offset: int,
-        value:           int,
-        struct_size:     int = FFLAG_STRUCT_SIZE,
+        value:            int,
+        struct_size:      int = FFLAG_STRUCT_SIZE,
     ) -> None:
-        """
-        Write a 32-bit integer FFlag value.
-
-        The FFlag struct at *fflag_addr* contains a pointer at
-        *value_ptr_offset* that points to the actual int32 storage.
-
-        Raises MemoryError on any failure.
-        """
         struct    = self._read_fflag_struct(handle, fflag_addr, struct_size)
         value_ptr = self._extract_ptr(struct, value_ptr_offset)
         self.mem.write_i32(handle, value_ptr, value)
-        log.debug("write_fflag_int  addr=0x%X offset=0x%X value=%d", fflag_addr, value_ptr_offset, value)
+        log.debug("write_fflag_int addr=0x%X offset=0x%X value=%d", fflag_addr, value_ptr_offset, value)
 
     def write_fflag_string(
         self,
-        handle:          int,
-        fflag_addr:      int,
+        handle:           int,
+        fflag_addr:       int,
         value_ptr_offset: int,
-        value:           str,
-        struct_size:     int = FFLAG_STRUCT_SIZE,
+        value:            str,
+        struct_size:      int = FFLAG_STRUCT_SIZE,
     ) -> None:
-        """
-        Write a UTF-8 string FFlag value.
-
-        Layout assumed inside the string instance pointed to by the
-        struct field at *value_ptr_offset*:
-          +0x00  uint64  buffer_ptr   (pointer to char[] data)
-          +0x08  uint64  length
-          +0x10  uint64  capacity
-
-        Raises StringCapacityError if the encoded value exceeds the
-        existing in-process buffer capacity.
-        Raises MemoryError on any I/O failure.
-        """
-        struct    = self._read_fflag_struct(handle, fflag_addr, struct_size)
-        inst_ptr  = self._extract_ptr(struct, value_ptr_offset)
+        struct   = self._read_fflag_struct(handle, fflag_addr, struct_size)
+        inst_ptr = self._extract_ptr(struct, value_ptr_offset)
 
         buf_ptr  = self.mem.read_u64(handle, inst_ptr + FFLAG_STRING_BUF_OFF)
         capacity = self.mem.read_u64(handle, inst_ptr + FFLAG_STRING_CAP_OFF)
@@ -405,3 +527,22 @@ class MemoryManager:
             "write_fflag_string addr=0x%X offset=0x%X value=%r len=%d cap=%d",
             fflag_addr, value_ptr_offset, value, new_len, capacity,
         )
+
+
+# ──────────────────────────────────────────────
+# Backward compat helper
+# ──────────────────────────────────────────────
+
+def close_handle(handle) -> None:
+    """
+    Đóng handle an toàn.
+    Nhận SafeHandle hoặc raw int.
+    Giữ lại để tương thích với code cũ.
+    """
+    if isinstance(handle, SafeHandle):
+        handle.close()
+    elif isinstance(handle, int) and handle not in (NULL_HANDLE, INVALID_HANDLE_VALUE):
+        result = windll.kernel32.CloseHandle(handle)
+        if not result:
+            log.warning("close_handle: CloseHandle failed for 0x%X (GLE=%d)",
+                        handle, windll.kernel32.GetLastError())

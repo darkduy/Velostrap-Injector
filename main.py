@@ -18,7 +18,7 @@ import sys
 from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
-from core.memory import MemoryManager, close_handle, AttachTimeoutError
+from core.memory import MemoryManager, AttachTimeoutError
 from core.scanner import PatternScanner
 
 log = logging.getLogger(__name__)
@@ -136,6 +136,7 @@ class FlagInjector:
         self._value_ptr_lru: OrderedDict[str, int] = OrderedDict()
         self._map_identity:  Tuple[int, int, int] = (0, 0, 0)
 
+        self._safe_handle: object = None
         self._attach()
         self._scan_offset()
 
@@ -143,9 +144,13 @@ class FlagInjector:
 
     def _attach(self) -> None:
         print("[ + ] Waiting for Roblox …")
-        self._process_handle, self._module_base, self._module_size = (
-            self._mm.attach(ROBLOX_EXE, ROBLOX_EXE)
-        )
+        # attach_raw trả về SafeHandle — owner là FlagInjector,
+        # đóng trong cleanup() để tránh leak
+        safe, base, size = self._mm.attach_raw(ROBLOX_EXE, ROBLOX_EXE)
+        self._safe_handle     = safe
+        self._process_handle  = safe.value
+        self._module_base     = base
+        self._module_size     = size
         print(f"[ + ] Attached  handle=0x{self._process_handle:X}")
         print(f"[ + ] Module    base=0x{self._module_base:X}  size=0x{self._module_size:X}")
 
@@ -444,8 +449,9 @@ class FlagInjector:
     def cleanup(self) -> None:
         """Release the process handle and clear all caches."""
         self._invalidate_caches(clear_hash=True)
-        if self._process_handle:
-            close_handle(self._process_handle)
+        if self._safe_handle is not None:
+            self._safe_handle.close()
+            self._safe_handle    = None
             self._process_handle = 0
 
 

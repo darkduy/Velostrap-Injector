@@ -4,7 +4,6 @@ mod process;
 mod scanner;
 
 use pyo3::prelude::*;
-use pyo3::PyTypeInfo;
 
 #[pymodule]
 fn core_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -14,10 +13,11 @@ fn core_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<process::SafeHandle>()?;
     m.add_class::<scanner::PatternScanner>()?;
 
-    m.add("MemoryError",     errors::MemoryError::type_object_bound(m.py()))?;
-    m.add("ProcessNotFound", errors::ProcessNotFound::type_object_bound(m.py()))?;
-    m.add("ModuleNotFound",  errors::ModuleNotFound::type_object_bound(m.py()))?;
-    m.add("AttachTimeout",   errors::AttachTimeout::type_object_bound(m.py()))?;
-    m.add("StringCapacity",  errors::StringCapacity::type_object_bound(m.py()))?;
+    let py = m.py();
+    m.add("MemoryError",     py.get_type::<errors::MemoryError>())?;
+    m.add("ProcessNotFound", py.get_type::<errors::ProcessNotFound>())?;
+    m.add("ModuleNotFound",  py.get_type::<errors::ModuleNotFound>())?;
+    m.add("AttachTimeout",   py.get_type::<errors::AttachTimeout>())?;
+    m.add("StringCapacity",  py.get_type::<errors::StringCapacity>())?;
     Ok(())
 }

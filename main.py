@@ -18,8 +18,7 @@ import sys
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
-from core import PatternScanner, AttachTimeoutError
-from core.memory import MemoryManager
+from core import PatternScanner, MemoryManager, AttachTimeoutError
 from core.gui_console import run_console
 
 log = logging.getLogger(__name__)

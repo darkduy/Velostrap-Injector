@@ -24,26 +24,22 @@ jobs:
         id: cache-rust
         uses: actions/cache@v4
         with:
-          path: core_rs/target   # fix: cache build output, không phải source
+          path: core_rs/target
           key: rust-${{ hashFiles('core_rs/src/**', 'core_rs/Cargo.toml', 'core_rs/Cargo.lock') }}
 
       - name: Build Rust core_rs
         if: steps.cache-rust.outputs.cache-hit != 'true'
         working-directory: core_rs
-        run: maturin build --release --target x86_64-pc-windows-msvc --out dist_rs
+        run: maturin build --release --target x86_64-pc-windows-msvc
 
       - name: Copy .pyd into core/
         working-directory: core_rs
         run: |
-          # fix: khi cache hit, lấy .pyd trực tiếp từ target/ thay vì dist_rs/
-          if (Test-Path dist_rs) {
-            $whl = Get-ChildItem dist_rs -Filter "*.whl" | Select-Object -First 1
-            Expand-Archive $whl.FullName -DestinationPath dist_rs\extracted -Force
-            $pyd = Get-ChildItem dist_rs\extracted -Recurse -Filter "*.pyd" | Select-Object -First 1
-          } else {
-            $pyd = Get-ChildItem target\x86_64-pc-windows-msvc\release -Filter "*.pyd" | Select-Object -First 1
-          }
-          if (-not $pyd) { Write-Error "No .pyd found"; exit 1 }
+          $pyd = Get-ChildItem target -Recurse -Filter "*.pyd" `
+            | Where-Object { $_.FullName -like "*release*" } `
+            | Select-Object -First 1
+          if (-not $pyd) { Write-Error "No .pyd found in target/"; exit 1 }
+          Write-Host "Found: $($pyd.FullName)"
           Copy-Item $pyd.FullName -Destination ..\core\core_rs.pyd
 
       - name: Build EXEs (release + debug)
@@ -58,6 +54,11 @@ jobs:
           pyinstaller --name main      @common
           pyinstaller --name mainDEBUG @common
 
+      - name: Pack release zip
+        run: |
+          Compress-Archive -Path dist\main.exe, dist\mainDEBUG.exe `
+            -DestinationPath dist\app.zip
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -65,11 +66,11 @@ jobs:
           path: |
             dist/main.exe
             dist/mainDEBUG.exe
+            dist/app.zip
 
       - name: Clean workflow artifacts
         if: always()
         run: |
-          Remove-Item -Recurse -Force dist_rs  -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force dist     -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force build    -ErrorAction SilentlyContinue
-          Remove-Item -Force *.spec            -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force dist  -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+          Remove-Item -Force *.spec         -ErrorAction SilentlyContinue

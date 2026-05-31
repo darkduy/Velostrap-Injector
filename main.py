@@ -18,7 +18,7 @@ import sys
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
-from core import PatternScanner, MemoryManager, AttachTimeoutError
+from core import PatternScanner, MemoryManager, NtMemory, AttachTimeoutError
 from core.gui_console import run_console
 
 log = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ def parse_flag_type(key: str) -> Tuple[str, str]:
 class FlagInjector:
     def __init__(self) -> None:
         self._mm  = MemoryManager()
-        self._mem = self._mm.mem
+        self._mem = NtMemory()
 
         self._process_handle:   int = 0
         self._module_base:      int = 0

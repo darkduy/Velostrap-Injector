@@ -8,9 +8,9 @@ name       = "core_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3       = { version = "0.21", features = ["extension-module"] }
+pyo3       = { version = "0.28.3", features = ["extension-module"] }
 scopeguard = "1.2"
-windows    = { version = "0.56", features = [
+windows    = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",

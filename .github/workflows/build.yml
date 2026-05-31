@@ -24,8 +24,8 @@ jobs:
         id: cache-rust
         uses: actions/cache@v4
         with:
-          path: core_rs
-          key: rust-${{ hashFiles('core_rs/**') }}
+          path: core_rs/target   # fix: cache build output, không phải source
+          key: rust-${{ hashFiles('core_rs/src/**', 'core_rs/Cargo.toml', 'core_rs/Cargo.lock') }}
 
       - name: Build Rust core_rs
         if: steps.cache-rust.outputs.cache-hit != 'true'
@@ -35,23 +35,28 @@ jobs:
       - name: Copy .pyd into core/
         working-directory: core_rs
         run: |
-          $whl = Get-ChildItem dist_rs -Filter "*.whl" | Select-Object -First 1
-          Expand-Archive $whl.FullName -DestinationPath dist_rs\extracted -Force
-          $pyd = Get-ChildItem dist_rs\extracted -Recurse -Filter "*.pyd" | Select-Object -First 1
+          # fix: khi cache hit, lấy .pyd trực tiếp từ target/ thay vì dist_rs/
+          if (Test-Path dist_rs) {
+            $whl = Get-ChildItem dist_rs -Filter "*.whl" | Select-Object -First 1
+            Expand-Archive $whl.FullName -DestinationPath dist_rs\extracted -Force
+            $pyd = Get-ChildItem dist_rs\extracted -Recurse -Filter "*.pyd" | Select-Object -First 1
+          } else {
+            $pyd = Get-ChildItem target\x86_64-pc-windows-msvc\release -Filter "*.pyd" | Select-Object -First 1
+          }
+          if (-not $pyd) { Write-Error "No .pyd found"; exit 1 }
           Copy-Item $pyd.FullName -Destination ..\core\core_rs.pyd
 
       - name: Build EXEs (release + debug)
         run: |
-          pyinstaller --onefile --console --name main `
-            --add-binary "core\core_rs.pyd;core" `
-            --add-data "core\gui_console.py;core" `
-            --add-data "core\__init__.py;core" `
-            main.py
-          pyinstaller --onefile --console --name mainDEBUG `
-            --add-binary "core\core_rs.pyd;core" `
-            --add-data "core\gui_console.py;core" `
-            --add-data "core\__init__.py;core" `
-            main.py
+          $common = @(
+            "--onefile", "--console",
+            "--add-binary", "core\core_rs.pyd;core",
+            "--add-data",   "core\gui_console.py;core",
+            "--add-data",   "core\__init__.py;core",
+            "main.py"
+          )
+          pyinstaller --name main      @common
+          pyinstaller --name mainDEBUG @common
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -64,7 +69,7 @@ jobs:
       - name: Clean workflow artifacts
         if: always()
         run: |
-          Remove-Item -Recurse -Force dist_rs -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-          Remove-Item -Force *.spec -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force dist_rs  -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force dist     -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build    -ErrorAction SilentlyContinue
+          Remove-Item -Force *.spec            -ErrorAction SilentlyContinue

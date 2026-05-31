@@ -10,10 +10,10 @@ use crate::process::{ProcessManager, SafeHandle};
 
 // ──────────────────────────────────────────────
 // NtDll bindings
+// edition 2024: extern blocks phải có `unsafe`
 // ──────────────────────────────────────────────
 
-#[link(name = "ntdll")]
-extern "system" {
+unsafe extern "system" {
     fn NtReadVirtualMemory(
         ProcessHandle:       isize,
         BaseAddress:         *const c_void,
@@ -34,15 +34,13 @@ extern "system" {
 const NT_SUCCESS: i32 = 0;
 
 // ──────────────────────────────────────────────
-// NtMemory — internal impl (pub fn để các module khác dùng)
+// NtMemory — internal impl
 // ──────────────────────────────────────────────
 
 #[pyclass]
 pub struct NtMemory;
 
 impl NtMemory {
-    /// Đọc *size* bytes từ *address* trong process *handle*.
-    /// pub (không phải pymethods) để scanner.rs gọi được.
     pub fn read_raw(&self, handle: isize, address: u64, size: usize) -> PyResult<Vec<u8>> {
         let mut buf  = vec![0u8; size];
         let mut read = 0usize;
@@ -98,7 +96,7 @@ impl NtMemory {
 }
 
 // ──────────────────────────────────────────────
-// NtMemory — Python API (#[pymethods])
+// NtMemory — Python API
 // ──────────────────────────────────────────────
 
 #[pymethods]

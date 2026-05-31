@@ -58,9 +58,10 @@ Velostrap-Injector/
 │   │   └── scanner.rs    — PatternScanner
 │   └── Cargo.toml
 ├── core/
-│   ├── __init__.py       — Import từ Rust backend
+│   ├── __init__.py       — Re-export toàn bộ class từ core_rs.pyd
+│   ├── gui_console.py    — Console UI layer (banner, input/output, progress)
 │   └── core_rs.pyd       — Rust binary (tự copy vào sau build)
-├── main.py               — Logic chính + OFF_* constants
+├── main.py               — Logic chính + OFF_* constants + FlagInjector
 ├── fflags.json           — Flags muốn inject
 └── .github/
     └── workflows/
@@ -72,6 +73,7 @@ Velostrap-Injector/
 |---|---|---|
 | `main.py` | Cao | `OFF_*` constants thay đổi khi struct layout đổi |
 | `core_rs/src/scanner.rs` | Trung bình | LEA opcodes thay đổi khi Roblox đổi register |
+| `core/gui_console.py` | Thấp | Banner, output format — không liên quan Roblox update |
 | `core_rs/src/memory.rs` | Thấp | Windows API ổn định |
 | `core_rs/src/process.rs` | Thấp | Toolhelp32 API ổn định |
 

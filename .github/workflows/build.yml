@@ -43,9 +43,15 @@ jobs:
       - name: Build EXEs (release + debug)
         run: |
           pyinstaller --onefile --console --name main `
-            --add-binary "core\core_rs.pyd;core" main.py
+            --add-binary "core\core_rs.pyd;core" `
+            --add-data "core\gui_console.py;core" `
+            --add-data "core\__init__.py;core" `
+            main.py
           pyinstaller --onefile --console --name mainDEBUG `
-            --add-binary "core\core_rs.pyd;core" main.py
+            --add-binary "core\core_rs.pyd;core" `
+            --add-data "core\gui_console.py;core" `
+            --add-data "core\__init__.py;core" `
+            main.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
